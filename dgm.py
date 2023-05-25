@@ -8,16 +8,17 @@ from torch.nn.parameter import Parameter
 from torch.optim import Adagrad
 from torch.utils.tensorboard import SummaryWriter
 
-rng = np.random.default_rng(seed=123)
+from spiral_dataset import spiral_data_2d
+
+rng = np.random.default_rng(seed=100)
 
 n_samples  = 20000
 
 X, _ = make_circles(n_samples, random_state=123)
-# X, _ = make_s_curve(n_samples, random_state=123)
-# X = np.reshape(spiral_data_2d(5, n_samples), (-1, 2))
+X = np.reshape(spiral_data_2d(5, n_samples), (-1, 2))
 rng.shuffle(X)
 feature_size = X.shape[-1]
-n_exports = 4
+n_exports = 8
 fig = plt.figure()
 ax = fig.add_subplot()
 ax.scatter(X[:, 0], X[:, 1])
@@ -35,10 +36,14 @@ class DemNet(nn.Module):
         self.lin2 = nn.Linear(128, 128)
         self.lin3 = nn.Linear(128, n_exports)
         self.relu = nn.ReLU()
+        self.softplus = nn.Softplus()
+        self.U = Parameter(torch.ones(self.feature_size))
         self.B = Parameter(torch.ones(self.feature_size))
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
+        init.constant_(self.U, 0)
+        init.constant_(self.B, 1)
         if isinstance(module, nn.Linear):
             init.xavier_normal_(module.weight, 1 )
             if module.bias is not None:
@@ -46,7 +51,7 @@ class DemNet(nn.Module):
 
     def energy(self, x):
         h = self.forward(x)
-        return torch.mean((x@x.t()).sum(-1) - x@self.B.t() - torch.log(1 + torch.exp(h)).sum(-1))
+        return torch.mean(((x-self.U)@(x-self.U).t()).sum(-1) - x@self.B.t() - self.softplus(h).sum(-1))
 
     def forward(self, x):
         x = self.relu(self.lin1(x))
@@ -78,6 +83,8 @@ class DgmNet(nn.Module):
         return 0.5 * (torch.log(dummy * self.bn1.running_var).sum() +
                       torch.log(dummy * self.bn2.running_var).sum())
 
+    def decode(self, x) -> torch.Tensor:
+        x = self.lin3.weight
 
     def forward(self, x):
         x = self.lin1(x)
@@ -99,7 +106,8 @@ opt_dem = Adagrad(dem_net.parameters(), lr=0.002, weight_decay=1e-5)
 batch_size = 20
 n_epochs = 1000
 grad_clip_value = 5.0
-writer = SummaryWriter("train_dynamics_ddg")
+grad_clip_normn = 10.0
+writer = SummaryWriter("")
 for i in range(n_epochs):
     dgm_net.train()
     n_batchs = n_samples // batch_size
@@ -116,7 +124,7 @@ for i in range(n_epochs):
         energy_x = dem_net.energy(x)
         loss = energy_x - energy_g
         loss.backward()
-        torch.nn.utils.clip_grad_value_(dem_net.parameters(), grad_clip_value)
+        torch.nn.utils.clip_grad_norm_(dem_net.parameters(), grad_clip_normn)
         opt_dem.step()
 
         writer.add_scalar("dem_loss", loss.item(), global_iix)
@@ -128,7 +136,7 @@ for i in range(n_epochs):
         z = torch.normal(torch.zeros(batch_size, n_exports))
         loss = dem_net.energy(dgm_net(z)) - dgm_net.entropy()
         loss.backward()
-        torch.nn.utils.clip_grad_value_(dem_net.parameters(), grad_clip_value)
+        torch.nn.utils.clip_grad_norm_(dem_net.parameters(), grad_clip_normn)
         opt_dgm.step()
 
         writer.add_scalar("dgm_loss", loss.item(), global_iix)
